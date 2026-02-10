@@ -51,6 +51,7 @@ class BiTeleopSlave:
         self._seq = 0
         self._sock = None
         self._recv_thread = None
+        self._server_sock = None
 
         self._slave_pose_cmd_left_pub = rospy.Publisher(
             slave_pose_cmd_left_topic,
@@ -87,12 +88,14 @@ class BiTeleopSlave:
         self._recv_thread.start()
 
     def _bind_and_accept(self):
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((self._host, self._port))
-        server.listen(1)
-        rospy.loginfo("Listening on %s:%s", self._host, self._port)
-        conn, addr = server.accept()
+        if self._server_sock is None:
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((self._host, self._port))
+            server.listen(1)
+            self._server_sock = server
+            rospy.loginfo("Listening on %s:%s", self._host, self._port)
+        conn, addr = self._server_sock.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._sock = conn
         rospy.loginfo("Client connected: %s:%s", addr[0], addr[1])
@@ -101,7 +104,14 @@ class BiTeleopSlave:
         while not rospy.is_shutdown():
             data = recv_frame(self._sock)
             if data is None:
-                break
+                rospy.logwarn("Socket recv error; waiting for new client")
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
+                self._bind_and_accept()
+                continue
             header = data.get("header")
             payload = data.get("payload")
             if not header or payload is None:

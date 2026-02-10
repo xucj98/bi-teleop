@@ -1,3 +1,4 @@
+import socket
 import struct
 import time
 
@@ -10,13 +11,18 @@ MSG_JOINT = 3
 
 HEADER_FMT = "<BBIQ"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
+MIN_FRAME_SIZE = HEADER_SIZE + 1
+MAX_FRAME_SIZE = 4096
 
 
 def _read_exact(sock, size):
     chunks = []
     received = 0
     while received < size and not rospy.is_shutdown():
-        data = sock.recv(size - received)
+        try:
+            data = sock.recv(size - received)
+        except (socket.timeout, OSError):
+            return None
         if not data:
             return None
         chunks.append(data)
@@ -29,6 +35,8 @@ def recv_frame(sock):
     if length_bytes is None:
         return None
     (length,) = struct.unpack("<I", length_bytes)
+    if length < MIN_FRAME_SIZE or length > MAX_FRAME_SIZE:
+        return None
     body = _read_exact(sock, length)
     if body is None:
         return None
@@ -132,5 +140,7 @@ def send_frame(sock, data):
 
     header_bytes = struct.pack(HEADER_FMT, version, msg_type, seq, timestamp_us)
     body = header_bytes + payload_bytes
+    if len(body) < MIN_FRAME_SIZE or len(body) > MAX_FRAME_SIZE:
+        raise ValueError("frame length out of bounds")
     packet = struct.pack("<I", len(body)) + body
     sock.sendall(packet)

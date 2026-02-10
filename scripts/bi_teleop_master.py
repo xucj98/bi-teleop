@@ -5,8 +5,6 @@ import threading
 import time
 
 import rospy
-import rostopic
-from roslib.message import get_message_class
 from arm_control.msg import JointControl, JointInformation, PosCmd
 
 from utils import MSG_JOINT, MSG_MODE, MSG_POSE, VERSION, recv_frame, send_frame
@@ -41,6 +39,7 @@ class BiTeleopMaster:
         self._sock = None
         self._recv_thread = None
         self._seq = 0
+        self._sock_lock = threading.Lock()
 
         self._master_joint_cmd_left_pub = rospy.Publisher(
             master_joint_cmd_left_topic,
@@ -69,19 +68,39 @@ class BiTeleopMaster:
                 self._master_pose_right = pose
 
     def _connect(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5.0)
-        sock.connect((self._server_host, self._server_port))
-        sock.settimeout(None)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self._sock = sock
-        rospy.loginfo("Connected to %s:%s", self._server_host, self._server_port)
+        while not rospy.is_shutdown():
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5.0)
+                sock.connect((self._server_host, self._server_port))
+                sock.settimeout(None)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError as exc:
+                rospy.logwarn("Connect failed: %s", exc)
+                time.sleep(1.0)
+                continue
+            with self._sock_lock:
+                if self._sock is not None:
+                    try:
+                        self._sock.close()
+                    except OSError:
+                        pass
+                self._sock = sock
+            rospy.loginfo("Connected to %s:%s", self._server_host, self._server_port)
+            return
 
     def _recv_loop(self):
         while not rospy.is_shutdown():
-            data = recv_frame(self._sock)
+            with self._sock_lock:
+                sock = self._sock
+            if sock is None:
+                time.sleep(0.1)
+                continue
+            data = recv_frame(sock)
             if data is None:
-                break
+                rospy.logwarn("Socket recv error; reconnecting")
+                self._connect()
+                continue
             header = data.get("header")
             payload = data.get("payload")
             if not header or payload is None:
@@ -154,7 +173,13 @@ class BiTeleopMaster:
                         "pose_left": self._master_pose_left, 
                         "pose_right": self._master_pose_right,
                     }
-                send_frame(self._sock, {"header": header, "payload": payload})
+                with self._sock_lock:
+                    sock = self._sock
+                if sock is not None:
+                    try:
+                        send_frame(sock, {"header": header, "payload": payload})
+                    except OSError as exc:
+                        rospy.logwarn("Send failed: %s", exc)
              
             last_mode = mode
             rate.sleep()
